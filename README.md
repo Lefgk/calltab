@@ -43,3 +43,7 @@ cd web && npm install && npm run dev  # http://localhost:5173
 ```
 
 Live deploy needs Lef's wallet and `CONFIRM_MAINNET=yes`. See [DEPLOY.md](DEPLOY.md). Never commit `.env` or keys.
+
+## Contact
+
+Support and questions: [lg.playstudio@gmail.com](mailto:lg.playstudio@gmail.com)
