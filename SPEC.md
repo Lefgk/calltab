@@ -10,7 +10,7 @@ Source: payments research, idea 2. Complements Agent Spend Controls: the owner s
 - One `CallTab` contract per chain, many tabs by id. USDC only. No admin and no protocol fee.
 - Payer locks USDC with a provider, an optional fixed-window period cap, optional expiry, and a challenge window (1 hour–7 days). Optional ERC-8004 ids are metadata only.
 - Payer or one agent key signs EIP-712 cumulative vouchers. The provider redeems only the unpaid delta, never more than the deposit. Domain binds chain and contract; the voucher binds `tabId` — no replay across tabs or chains.
-- Payer can pause (blocks redeem while open), top up, and rotate the agent. Close starts a challenge window so the provider can submit a last voucher even if paused; then anyone can finalize and the remainder is refunded.
+- Payer can pause (blocks redeem while open, after one challenge window), top up, and rotate the agent (the old agent's vouchers stay valid for one challenge window; audit 2026-11-23 M-1/M-2). Close starts a challenge window so the provider can submit a last voucher even if paused; then anyone can finalize and the remainder is refunded.
 - Simple dapp: open, sign, redeem, pause, close. TypeScript helper to sign and verify vouchers.
 
 **Out.** Other chains, ETH, fees, a clone factory, automatic close at expiry.

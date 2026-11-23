@@ -73,6 +73,7 @@ contract CallTab is EIP712, ReentrancyGuard {
     error BadSignature();
     error EmptyTab();
     error ExceedsPeriodCap(uint256 requested, uint256 remainingCap);
+    error AgentRotationPending();
 
     // --- events ---
 
@@ -119,6 +120,14 @@ contract CallTab is EIP712, ReentrancyGuard {
     mapping(uint256 => Tab) internal _tabs;
     mapping(address => uint256[]) internal _tabsOfPayer;
     mapping(address => uint256[]) internal _tabsOfProvider;
+
+    // Audit 2026-11-23 (M-1, M-2): payer-side revocations take effect only after the tab's
+    // challenge window, so the provider can always redeem vouchers it already holds.
+    /// @notice When the current pause started (0 if not paused).
+    mapping(uint256 => uint64) public pausedAt;
+    /// @notice Agent replaced by the last setAgent; its vouchers stay valid until previousAgentUntil.
+    mapping(uint256 => address) public previousAgent;
+    mapping(uint256 => uint64) public previousAgentUntil;
 
     constructor(address usdc_) EIP712("Calltab", "1") {
         if (usdc_ == address(0)) revert ZeroAddress();
@@ -231,18 +240,30 @@ contract CallTab is EIP712, ReentrancyGuard {
         emit TopUp(tabId, amount, t.deposited);
     }
 
+    /// @notice Rotate the agent key. The replaced agent's vouchers stay redeemable for one
+    ///         challenge window; a second rotation must wait until that grace ends.
     function setAgent(uint256 tabId, address agent) external {
         Tab storage t = _requirePayer(tabId);
         if (t.status != Status.Open) revert NotOpen();
+        address old = t.agent;
+        if (old != agent && old != address(0)) {
+            // One grace at a time, so a double rotation cannot cut the first grace short.
+            if (block.timestamp <= previousAgentUntil[tabId]) revert AgentRotationPending();
+            previousAgent[tabId] = old;
+            previousAgentUntil[tabId] = uint64(block.timestamp) + t.challengeWindow;
+        }
         t.agent = agent;
         emit AgentSet(tabId, agent);
     }
 
+    /// @notice Pause redeem. Takes effect one challenge window after the call, so the provider
+    ///         can still redeem vouchers it already holds (before their deadline).
     function pause(uint256 tabId) external {
         Tab storage t = _requirePayer(tabId);
         if (t.status != Status.Open) revert NotOpen();
         if (t.paused) revert AlreadyPaused();
         t.paused = true;
+        pausedAt[tabId] = uint64(block.timestamp);
         emit Paused(tabId);
     }
 
@@ -251,6 +272,7 @@ contract CallTab is EIP712, ReentrancyGuard {
         if (t.status != Status.Open) revert NotOpen();
         if (!t.paused) revert NotPaused();
         t.paused = false;
+        pausedAt[tabId] = 0;
         emit Unpaused(tabId);
     }
 
@@ -265,7 +287,10 @@ contract CallTab is EIP712, ReentrancyGuard {
         if (msg.sender != t.provider) revert NotProvider();
         if (t.status == Status.Closed) revert NotOpen();
         if (t.status == Status.Open) {
-            if (t.paused) revert TabPaused();
+            // A pause blocks redeem only after the challenge window, like a close does.
+            if (t.paused && block.timestamp > uint256(pausedAt[tabId]) + uint256(t.challengeWindow)) {
+                revert TabPaused();
+            }
         } else {
             // Closing: last-voucher window. Pause cannot block this.
             if (block.timestamp > uint256(t.closeInitiatedAt) + uint256(t.challengeWindow)) {
@@ -277,7 +302,11 @@ contract CallTab is EIP712, ReentrancyGuard {
 
         bytes32 digest = hashVoucher(tabId, cumulativeAmount, deadline);
         address signer = ECDSA.recover(digest, signature);
-        if (signer != t.payer && (t.agent == address(0) || signer != t.agent)) revert BadSignature();
+        if (signer != t.payer && (t.agent == address(0) || signer != t.agent)) {
+            if (signer != previousAgent[tabId] || block.timestamp > previousAgentUntil[tabId]) {
+                revert BadSignature();
+            }
+        }
 
         uint256 owed = cumulativeAmount - t.claimed;
         uint256 avail = t.deposited - t.claimed - t.refunded;

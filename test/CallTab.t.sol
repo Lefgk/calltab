@@ -261,6 +261,8 @@ contract CallTabTest is Test {
 
         vm.prank(payer);
         tab.setAgent(id, other);
+        // audit M-1: the old agent keeps a one-window grace, then is revoked
+        vm.warp(block.timestamp + WINDOW + 1);
         bytes memory oldAgentSig = _sign(agentKey, id, 30e6, 0);
         vm.prank(provider);
         vm.expectRevert(CallTab.BadSignature.selector);
@@ -288,6 +290,8 @@ contract CallTabTest is Test {
         uint256 id = _openDefault();
         vm.prank(payer);
         tab.pause(id);
+        // audit M-2: pause bites only after the challenge window
+        vm.warp(block.timestamp + WINDOW + 1);
         bytes memory sig = _sign(payerKey, id, 10e6, 0);
         vm.prank(provider);
         vm.expectRevert(CallTab.TabPaused.selector);
