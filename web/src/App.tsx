@@ -1,125 +1,57 @@
 import { useMemo, useState } from "react";
-import {
-  useAccount,
-  useChainId,
-  useConnect,
-  useDisconnect,
-  usePublicClient,
-  useReadContract,
-  useSwitchChain,
-  useWalletClient,
-  useWriteContract,
-} from "wagmi";
-import { erc20Abi, formatUnits, parseUnits, type Address, type Hex } from "viem";
+import { useAccount, useChainId, usePublicClient, useReadContract, useWalletClient } from "wagmi";
+import { erc20Abi, formatUnits, isAddress, parseUnits, type Address, type Hex } from "viem";
 import { callTabAbi } from "./abi";
 import { deployments } from "./config";
+import { Addr, Empty, Hint, Loading, Shell, short, useTx } from "./ui";
 import { signVoucher, type Voucher } from "./lib/voucher";
 
-const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const STATUS = ["Open", "Closing", "Closed"] as const;
+const ZERO = "0x0000000000000000000000000000000000000000";
 
 export default function App() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const { connect, connectors } = useConnect();
-  const { disconnect } = useDisconnect();
-  const { switchChain, chains } = useSwitchChain();
   const dep = deployments[chainId] ?? {};
   const [tabId, setTabId] = useState("");
+  const validTabId = /^\d+$/.test(tabId);
 
   return (
-    <div className="wrap">
-      <h1>Calltab</h1>
-      <div className="muted">
-        Prepaid USDC tabs for agents: lock once, sign cumulative EIP-712 vouchers, redeem only the
-        delta, pause any time, close with a challenge window. Prototype — not audited. Ethereum,
-        Base and local anvil.
-      </div>
-
-      <div className="card">
-        <h2>Wallet</h2>
-        {!isConnected ? (
-          <div className="row">
-            {connectors.map((c) => (
-              <button key={c.uid} onClick={() => connect({ connector: c })}>
-                Connect {c.name}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="row">
-            <span>
-              Connected <code>{address}</code>
-            </span>
-            <button className="ghost" onClick={() => disconnect()}>
-              Disconnect
-            </button>
-          </div>
-        )}
-        <div className="row">
-          {chains.map((c) => (
-            <button
-              key={c.id}
-              className={c.id === chainId ? "" : "ghost"}
-              onClick={() => switchChain({ chainId: c.id })}
-            >
-              {c.name}
-            </button>
-          ))}
-        </div>
-        {!deployments[chainId] && (
-          <div className="warn">Unsupported chain: use Ethereum, Base or local anvil.</div>
-        )}
-        {deployments[chainId] && !dep.calltab && (
-          <div className="warn">
-            <strong>Not deployed yet</strong> on this chain — the CallTab address is empty. Core
-            flows stay disabled until you deploy (<code>make deploy-mainnet</code> or{" "}
-            <code>make deploy-base</code>), which writes the address into{" "}
-            <code>web/src/deployments.json</code>.
-          </div>
-        )}
-        {deployments[chainId]?.live && dep.calltab && (
-          <div className="warn">
-            Live chain with real funds. This contract is NOT audited — only deposit amounts you can
-            afford to lose.
-          </div>
-        )}
-      </div>
+    <Shell
+      title="Calltab"
+      tagline="A prepaid USDC tab between a payer (or their AI agent) and an API provider. Lock USDC once, pay per call with signed off-chain vouchers, and let the provider collect only what the latest voucher says. Pause any time; close with a challenge window."
+      steps={[
+        "Payer opens a tab: USDC is locked in the contract for one provider.",
+        "Payer or their agent signs vouchers for the running total owed (no gas).",
+        "Provider redeems the latest voucher and receives only the new amount.",
+        "Payer closes: after the challenge window the unspent USDC is refunded.",
+      ]}
+      contractLabel="CallTab"
+      contractOf={(id) => deployments[id]?.calltab}
+      refs={[{ label: "USDC", address: dep.usdc }]}
+      risk={
+        <>
+          <strong>Real funds.</strong> This contract is not audited. USDC you lock in a tab can be claimed by the
+          provider up to the amount of any voucher you or your agent sign. Only deposit amounts you can afford to lose.
+        </>
+      }
+    >
+      {!isConnected && <Empty>Connect a wallet to open a tab or manage one you are part of.</Empty>}
 
       {isConnected && address && dep.calltab && dep.usdc && (
         <>
           <OpenTab calltab={dep.calltab} usdc={dep.usdc} onOpened={setTabId} />
-          <TabPicker
-            address={address}
-            calltab={dep.calltab}
-            tabId={tabId}
-            setTabId={setTabId}
-          />
-          {tabId && <TabActions calltab={dep.calltab} usdc={dep.usdc} tabId={BigInt(tabId)} />}
+          <TabPicker address={address} calltab={dep.calltab} tabId={tabId} setTabId={setTabId} />
+          {tabId && !validTabId && (
+            <div className="card">
+              <div className="bad muted">A tab id is a whole number, for example 1.</div>
+            </div>
+          )}
+          {validTabId && <TabActions calltab={dep.calltab} usdc={dep.usdc} tabId={BigInt(tabId)} />}
         </>
       )}
-    </div>
+    </Shell>
   );
-}
-
-function useTx() {
-  const { writeContractAsync } = useWriteContract();
-  const client = usePublicClient();
-  const [status, setStatus] = useState("");
-  const run = async (label: string, fn: () => Promise<`0x${string}`>) => {
-    try {
-      setStatus(`${label}: confirm in wallet…`);
-      const hash = await fn();
-      setStatus(`${label}: pending ${short(hash)}`);
-      await client!.waitForTransactionReceipt({ hash });
-      setStatus(`${label}: confirmed ✓`);
-      return true;
-    } catch (e) {
-      setStatus(`${label}: ${(e as Error).message.split("\n")[0]}`);
-      return false;
-    }
-  };
-  return { writeContractAsync, status, run };
 }
 
 function OpenTab({
@@ -131,7 +63,7 @@ function OpenTab({
   usdc: Address;
   onOpened: (id: string) => void;
 }) {
-  const { writeContractAsync, status, run } = useTx();
+  const { writeContractAsync, status, run, safe, fail } = useTx();
   const publicClient = usePublicClient();
   const [provider, setProvider] = useState("");
   const [amount, setAmount] = useState("100");
@@ -143,11 +75,14 @@ function OpenTab({
 
   return (
     <div className="card">
-      <h2>1. Open a tab</h2>
+      <h2>1. Open a tab (payer)</h2>
+      <p className="muted">
+        You are the payer. The provider is the address that will be allowed to collect from this tab.
+      </p>
       <div className="row">
         <label>
           Provider address
-          <input value={provider} placeholder="0x…" onChange={(e) => setProvider(e.target.value)} />
+          <input value={provider} placeholder="0x…" spellCheck={false} onChange={(e) => setProvider(e.target.value.trim())} />
         </label>
         <label>
           Amount (USDC)
@@ -175,18 +110,21 @@ function OpenTab({
       <div className="row">
         <label>
           Agent signer (optional)
-          <input value={agent} placeholder="0x… or empty" onChange={(e) => setAgent(e.target.value)} />
+          <input value={agent} placeholder="0x… or empty" spellCheck={false} onChange={(e) => setAgent(e.target.value.trim())} />
         </label>
         <button
-          onClick={async () => {
+          onClick={safe(async () => {
+            if (!isAddress(provider)) return fail("Provider must be a valid address (0x followed by 40 hex characters).");
+            if (agent && !isAddress(agent)) return fail("Agent signer must be a valid address, or left empty.");
             const amt = parseUnits(amount, 6);
+            if (amt === 0n) return fail("Amount must be greater than 0.");
             const cap = periodCap ? parseUnits(periodCap, 6) : 0n;
             const duration = cap > 0n ? BigInt(Math.floor(Number(periodDays || "1") * 86400)) : 0n;
             const expiry = expiryDays
               ? BigInt(Math.floor(Date.now() / 1000) + Number(expiryDays) * 86400)
               : 0n;
             const window = BigInt(Math.floor(Number(windowHours || "24") * 3600));
-            const agentAddr = (agent || "0x0000000000000000000000000000000000000000") as Address;
+            const agentAddr = (agent || ZERO) as Address;
             if (
               await run("Approve USDC", () =>
                 writeContractAsync({ address: usdc, abi: erc20Abi, functionName: "approve", args: [calltab, amt] }),
@@ -209,12 +147,18 @@ function OpenTab({
                 onOpened((next - 1n).toString());
               }
             }
-          }}
+          })}
         >
           Approve + open
         </button>
       </div>
-      <div className="muted">{status}</div>
+      <Hint>
+        Two wallet prompts. First an approval for exactly the amount above, then “open tab”, which moves that USDC
+        from your wallet into the CallTab contract. The provider can only collect against vouchers signed by you or
+        the agent signer; the period cap limits how much can be collected per period. Unspent USDC comes back when
+        you close the tab.
+      </Hint>
+      {status}
     </div>
   );
 }
@@ -230,7 +174,7 @@ function TabPicker({
   tabId: string;
   setTabId: (id: string) => void;
 }) {
-  const { data: asPayer } = useReadContract({
+  const { data: asPayer, isLoading } = useReadContract({
     address: calltab,
     abi: callTabAbi,
     functionName: "tabsOfPayer",
@@ -252,21 +196,27 @@ function TabPicker({
   return (
     <div className="card">
       <h2>2. Select a tab</h2>
-      <div className="row">
-        <label>
-          Tab id
-          <input value={tabId} placeholder="1" onChange={(e) => setTabId(e.target.value)} />
-        </label>
-      </div>
-      {mine.length > 0 && (
+      <div className="field-label">Tabs where you are payer or provider</div>
+      {isLoading ? (
+        <Loading>Looking up your tabs…</Loading>
+      ) : mine.length > 0 ? (
         <div className="row">
           {mine.map((id) => (
-            <button key={id} className={id === tabId ? "" : "ghost"} onClick={() => setTabId(id)}>
-              #{id}
+            <button key={id} className={id === tabId ? "seg seg-on" : "seg"} aria-pressed={id === tabId} onClick={() => setTabId(id)}>
+              Tab #{id}
+              <span className="seg-sub">{id === tabId ? "selected" : "select"}</span>
             </button>
           ))}
         </div>
+      ) : (
+        <Empty>This wallet has no tabs on this network yet. Open one above, or enter a tab id to inspect it.</Empty>
       )}
+      <div className="row">
+        <label>
+          Or open a tab by id
+          <input value={tabId} placeholder="1" inputMode="numeric" onChange={(e) => setTabId(e.target.value.trim())} />
+        </label>
+      </div>
     </div>
   );
 }
@@ -275,8 +225,8 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
   const chainId = useChainId();
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
-  const { writeContractAsync, status, run } = useTx();
-  const { data: t, refetch } = useReadContract({
+  const { writeContractAsync, status, run, safe, fail } = useTx();
+  const { data: t, refetch, isLoading } = useReadContract({
     address: calltab,
     abi: callTabAbi,
     functionName: "getTab",
@@ -288,11 +238,11 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
   const [deadlineHours, setDeadlineHours] = useState("");
   const [signature, setSignature] = useState("");
 
-  if (!t || t.payer === "0x0000000000000000000000000000000000000000") {
+  if (!t || t.payer === ZERO) {
     return (
       <div className="card">
-        <h2>3. Tab</h2>
-        <div className="muted">No tab with that id on this chain.</div>
+        <h2>3. Tab #{tabId.toString()}</h2>
+        {isLoading ? <Loading /> : <Empty>No tab with that id on this network.</Empty>}
       </div>
     );
   }
@@ -312,11 +262,35 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
   return (
     <div className="card">
       <h2>3. Tab #{tabId.toString()}</h2>
-      <div className="muted">
-        {statusLabel}
-        {t.paused ? " · paused" : ""} · payer {short(t.payer)} · provider {short(t.provider)}
-        {t.agent !== "0x0000000000000000000000000000000000000000" ? ` · agent ${short(t.agent)}` : ""}
-      </div>
+      <dl className="dl">
+        <dt>Status</dt>
+        <dd>
+          <span className={t.status === 0 && !t.paused ? "ok" : "bad"}>{statusLabel}</span>
+          {t.paused ? " · paused (redeems blocked)" : ""}
+        </dd>
+        <dt>Payer</dt>
+        <dd>
+          <Addr value={t.payer} /> {isPayer && <span className="ok">(you)</span>}
+        </dd>
+        <dt>Provider</dt>
+        <dd>
+          <Addr value={t.provider} /> {isProvider && <span className="ok">(you)</span>}
+        </dd>
+        {t.agent !== ZERO && (
+          <>
+            <dt>Agent signer</dt>
+            <dd>
+              <Addr value={t.agent} />
+            </dd>
+          </>
+        )}
+      </dl>
+      {!isPayer && !isProvider && (
+        <div className="info">
+          You are neither the payer nor the provider of this tab ({short(address)}). You can read it and finalize a
+          close, but the other actions are disabled.
+        </div>
+      )}
       <table>
         <tbody>
           <tr>
@@ -342,14 +316,15 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
         </tbody>
       </table>
 
-      <div className="row" style={{ marginTop: 12 }}>
+      <h3>Payer controls</h3>
+      <div className="row">
         <label>
           Top up (USDC)
           <input value={topUpAmt} onChange={(e) => setTopUpAmt(e.target.value)} />
         </label>
         <button
           disabled={!isPayer}
-          onClick={async () => {
+          onClick={safe(async () => {
             const amt = parseUnits(topUpAmt, 6);
             if (
               await run("Approve USDC", () =>
@@ -361,14 +336,14 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
               );
               refetch();
             }
-          }}
+          })}
         >
-          Top up
+          Approve + top up
         </button>
         <button
           disabled={!isPayer}
           className={t.paused ? "" : "ghost"}
-          onClick={async () => {
+          onClick={safe(async () => {
             await run(t.paused ? "Unpause" : "Pause", () =>
               writeContractAsync({
                 address: calltab,
@@ -378,14 +353,14 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
               }),
             );
             refetch();
-          }}
+          })}
         >
           {t.paused ? "Unpause" : "Pause"}
         </button>
         <button
           disabled={!isPayer || t.status !== 0}
           className="danger"
-          onClick={async () => {
+          onClick={safe(async () => {
             await run("Initiate close", () =>
               writeContractAsync({
                 address: calltab,
@@ -395,13 +370,13 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
               }),
             );
             refetch();
-          }}
+          })}
         >
           Initiate close
         </button>
         <button
           disabled={t.status !== 1}
-          onClick={async () => {
+          onClick={safe(async () => {
             await run("Finalize close", () =>
               writeContractAsync({
                 address: calltab,
@@ -411,14 +386,26 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
               }),
             );
             refetch();
-          }}
+          })}
         >
           Finalize close
         </button>
       </div>
+      <Hint>
+        Top up adds USDC from your wallet to this tab (approval, then top up). Pause blocks the provider from
+        redeeming until you unpause.
+      </Hint>
+      <Hint tone="danger">
+        Initiate close starts the challenge window ({Number(t.challengeWindow) / 3600} hours): the provider can still
+        redeem the latest voucher during it. After the window, “Finalize close” (anyone can press it) refunds the
+        unspent USDC to the payer and the tab is closed for good.
+      </Hint>
 
-      <h2 style={{ marginTop: 16 }}>Sign voucher</h2>
-      <div className="muted">Payer or authorized agent signs a cumulative amount (USDC, all-time owed).</div>
+      <h3>Voucher (payer or agent signs, provider redeems)</h3>
+      <p className="muted">
+        A voucher states the total owed since the tab opened, not the next payment. Signing 10 and later 25 lets the
+        provider collect 25 in total.
+      </p>
       <div className="row">
         <label>
           Cumulative USDC
@@ -430,23 +417,30 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
         </label>
         <button
           disabled={!walletClient}
-          onClick={async () => {
+          onClick={safe(async () => {
             const v = buildVoucher();
+            if (v.cumulativeAmount > t.deposited)
+              return fail("Cumulative amount is larger than the tab deposit. Top up first or lower the amount.");
             const sig = await signVoucher(walletClient!, chainId, calltab, v);
             setSignature(sig);
-          }}
+          })}
         >
           Sign voucher
         </button>
       </div>
+      <Hint>
+        Signing is free and sends no transaction, but it is a payment promise: whoever holds this signature and is
+        the provider can collect up to the cumulative amount from the tab. The wallet shows the tab id, amount and
+        deadline before you sign.
+      </Hint>
       <label>
         Signature
-        <textarea value={signature} onChange={(e) => setSignature(e.target.value)} placeholder="0x…" />
+        <textarea value={signature} spellCheck={false} onChange={(e) => setSignature(e.target.value.trim())} placeholder="0x…" />
       </label>
       <div className="row" style={{ marginTop: 8 }}>
         <button
           disabled={!isProvider || !signature}
-          onClick={async () => {
+          onClick={safe(async () => {
             const v = buildVoucher();
             await run("Redeem", () =>
               writeContractAsync({
@@ -457,12 +451,16 @@ function TabActions({ calltab, usdc, tabId }: { calltab: Address; usdc: Address;
               }),
             );
             refetch();
-          }}
+          })}
         >
           Redeem (provider)
         </button>
       </div>
-      <div className="muted">{status}</div>
+      <Hint>
+        Redeem sends one transaction that pays the provider the cumulative amount minus what was already claimed.
+        The amount and deadline fields above must match the signed voucher exactly.
+      </Hint>
+      {status}
     </div>
   );
 }
